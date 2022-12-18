@@ -1,0 +1,239 @@
+package oper
+
+
+import com.typesafe.scalalogging.LazyLogging
+import conf.DatabaseConf
+import datamodels.RawNewsDTO
+import org.apache.spark.SparkConf
+import org.apache.spark.sql.{SaveMode, SparkSession}
+
+import java.io.File
+import java.text.SimpleDateFormat
+import java.util.Locale
+import scala.collection.convert.ImplicitConversions.`list asScalaBuffer`
+import scala.io.Source
+import scala.util.{Failure, Success, Try}
+import java.sql.Timestamp
+
+//import  org.apache.spark.sql.sources.
+// This import is needed to use the $-notation
+
+
+object RawDataProcessor extends LazyLogging {
+
+  var nextPortionCounter: Int = -1
+  var portionFilePath = ".lastPortionNum"
+
+  // есть Н-файлов + пронумерованных
+  // нужно загрузить счетчик следующего файла из файла nextFileNumber +
+  // если нет -> начать с 0 + сохранить 0счетчик в файл
+  //
+  //  загрузили файл + почистили его
+  //
+  // грузим в бд в таблицу NEWS
+  // загрузили - обновили мчетчик
+
+  val UNKNOWN_CATEGORY = "_unknown_category_"
+
+  val sparkConf = new SparkConf()
+    .setAppName("RawDataProcessor")
+    .setMaster("local")
+
+  val sparkSession = SparkSession
+    .builder()
+    .config(sparkConf)
+    .config("spark.jars", "./sparkjars/postgresql-42.5.1.jar")
+    .getOrCreate()
+
+  val sparkContext = sparkSession.sparkContext
+
+
+  val categoryMappingDF = this.sparkSession.read
+    .format("jdbc")
+    .option("url", DatabaseConf.Url())
+    .option("dbtable", f"${DatabaseConf.categoryMappingTableName}")
+    .option("user", DatabaseConf.user)
+    .option("password", DatabaseConf.pass)
+    .load()
+
+  val newsDF = this.sparkSession.read
+    .format("jdbc")
+    .option("url", DatabaseConf.Url())
+    .option("dbtable", f"${DatabaseConf.newsTableName}")
+    .option("user", DatabaseConf.user)
+    .option("password", DatabaseConf.pass)
+    .load()
+
+  val uncategorizedNewsDF = this.sparkSession.read
+    .format("jdbc")
+    .option("url", DatabaseConf.Url())
+    .option("dbtable", f"${DatabaseConf.uncategorizedNewsTableName}")
+    .option("user", DatabaseConf.user)
+    .option("password", DatabaseConf.pass)
+    .load()
+
+
+  {
+
+    sparkContext.setLogLevel("ERROR")
+
+
+    this.newsDF.createOrReplaceTempView(DatabaseConf.newsTableName)
+    this.categoryMappingDF.createOrReplaceTempView(DatabaseConf.categoryMappingTableName)
+    this.uncategorizedNewsDF.createOrReplaceTempView(DatabaseConf.uncategorizedNewsTableName)
+  }
+
+
+  def getNextPortionNum(): Int = {
+    if (this.nextPortionCounter < 0) {
+      // try to read from file
+      this.nextPortionCounter = Try {
+        val lines = Source.fromFile(portionFilePath).getLines.toList
+        lines.head.toInt
+      } match {
+        case Success(i) => i
+        case Failure(s) => 0
+      }
+    }
+    this.nextPortionCounter
+  }
+
+  def setNextPortionNum(num: Int): Unit = {
+    Utiler.printToFile(new File(this.portionFilePath)) { writer => writer.println(num) }
+    this.nextPortionCounter = num
+  }
+
+
+  def cleanAndUploadRawData(rawNews: Seq[RawNewsDTO]): Unit = {
+    val categoryMapping = getExistingCategoryMapping()
+    val categorizedNews = rawNews.groupBy(n => getCanonicalCategory(n, categoryMapping))
+    this.insertNewsToTables(categorizedNews)
+  }
+
+  def processUncategorizedNews(): Unit = {
+    import sparkSession.implicits._
+    val sdf: SimpleDateFormat = new SimpleDateFormat(conf.DatabaseConf.timestampFormatString, Locale.getDefault)
+
+
+    val uncategorizedNews = this.uncategorizedNewsDF.map(row => {
+      val timestamp = Utiler.TimestampToString(row.get(3), sdf)
+      timestamp match {
+        case None => {
+          logger.error(f"can't cast Timestamp to string - skip uncategorized news hash:[${row.get(0)}]")
+          Option.empty[RawNewsDTO]
+        }
+        case _ => Some(RawNewsDTO(
+          Categories = Utiler.ParseJsonArray(row.getString(4)),
+          Title = row.getString(1),
+          Url = row.getString(2),
+          PublishedDateTime = timestamp.get))
+      }
+    }).filter(!_.isEmpty).map(e => e.get).collect().toSeq
+
+    val categoryMapping = getExistingCategoryMapping()
+    val categorizedNews = uncategorizedNews.groupBy(n => getCanonicalCategory(n, categoryMapping))
+    val processedNewsHashes = insertNewsToTables(categorizedNews)
+    deleteFromUncategorizedNewsTable(processedNewsHashes)
+  }
+
+
+  private def insertNewsToTables(canonicalCategoryToNewsDTOs: Map[String, Seq[RawNewsDTO]]): Array[String] = {
+
+    var addedNewsHashes = Array[String]()
+    canonicalCategoryToNewsDTOs foreach { case (ctg, newsDTOs) =>
+      newsDTOs.foreach(news => {
+
+        val query = ctg match {
+          case UNKNOWN_CATEGORY => {
+            this.insertUnknownCategoriesIntoTable(news.Categories)
+            val categoriesJsonStr = Utiler.SeqToJsonArrayString(news.Categories)
+            f"INSERT INTO ${DatabaseConf.uncategorizedNewsTableName} " +
+              f"(news_hash, title, url, published_datetime, categories) " +
+              f"VALUES ('${news.md5()}', '${news.Title}', '${news.Url}', CAST('${news.PublishedDateTime}' AS timestamp), '${categoriesJsonStr}');"
+          }
+          case _ => f"INSERT INTO ${DatabaseConf.newsTableName} " +
+            f"(news_hash, title, url, published_datetime, canonical_category) " +
+            f"VALUES ('${news.md5()}', '${news.Title}', '${news.Url}', CAST('${news.PublishedDateTime}' AS timestamp), '$ctg');"
+        }
+
+        try {
+          this.sparkSession.sql(query)
+          addedNewsHashes = addedNewsHashes :+ news.md5() // if no exception then add to hashes
+        } catch {
+          case e: Exception => None
+        }
+
+      })
+    }
+    addedNewsHashes
+  }
+
+  private def insertUnknownCategoriesIntoTable(unknownCategories: Seq[String]): Unit = {
+    unknownCategories.map(_.toLowerCase)
+      .foreach(ctg => {
+        val query = f"INSERT INTO ${DatabaseConf.categoryMappingTableName} " +
+          f"(raw_category_hash, raw_category, canonical_category) " +
+          f"VALUES ('${Utiler.md5(ctg)}', '${ctg}', '');"
+
+        try {
+          this.sparkSession.sql(query)
+        } catch {
+          case e: Exception => None
+        }
+      })
+  }
+
+  /**
+   * Delete news from UncategorizedNewsTable by given hashes. Deletion is performed
+   * by non-spark way
+   * @param newsHashes
+   */
+  private def deleteFromUncategorizedNewsTable(newsHashes: Seq[String]): Unit = {
+    import sparkSession.implicits._
+    val sqlHashStrings = uncategorizedNewsDF.filter(row => newsHashes.contains(row.get(0).toString))
+      .map(row => row.getString(0))
+      .map(hash => f"'$hash'").collect()
+
+    val sqlHashString = sqlHashStrings.size match {
+      case 0 => ""
+      case 1 => sqlHashStrings(0)
+      case _ => sqlHashStrings.mkString(",")
+    }
+
+    if (!sqlHashString.isEmpty) {
+      val query = f"DELETE FROM ${conf.DatabaseConf.uncategorizedNewsTableName} WHERE news_hash IN ($sqlHashString);"
+      DBManager.executeWriteQuery(query)
+    }
+  }
+
+  /**
+   * Read mapping from db-table.
+   *
+   * @return map{raw_category : canonical_category}
+   */
+  private def getExistingCategoryMapping() =
+    categoryMappingDF.select("raw_category", "canonical_category").collectAsList()
+      .filter(row => row.get(1).toString.trim.size > 0) // row with empty canonical category shouldn't participate in mapping
+      .map(row => {
+        row.get(0).toString -> row.get(1).toString
+      })
+      .toMap
+
+
+  private def getCanonicalCategory(news: RawNewsDTO, categoryMapping: Map[String, String]): String = {
+    val foundCanonicalCategories = news.Categories
+      .filter(newsCtg => categoryMapping.contains(newsCtg.toLowerCase()))
+      .map(newsCtg => categoryMapping.get(newsCtg.toLowerCase()))
+
+    if (foundCanonicalCategories.size > 0) {
+      foundCanonicalCategories.head.get
+    } else {
+      UNKNOWN_CATEGORY
+    }
+  }
+
+
+}
+
+
+
