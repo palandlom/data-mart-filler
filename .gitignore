@@ -1,16 +1,22 @@
 # Byte-compiled / optimized / DLL files
+**/newsFiles/**
 __pycache__/
 *.py[cod]
 *$py.class
 
+**/.tmp/**
+./filler/spark-warehouse/**
+sparkjars/
 **/.idea/**
 **/.bsp/**
+*.iml
 
 # C extensions
 *.so
 
 # Distribution / packaging
 .Python
+
 build/
 develop-eggs/
 dist/

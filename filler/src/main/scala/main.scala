@@ -54,7 +54,7 @@ object Main extends App with LazyLogging {
   // === function for performCategoryAnalysis
   val performCategoryAnalysis = () => {
     logger.info(f"PerformCategoryAnalysis started")
-    oper.DataAnalyser.performCategoryAnalysis()
+    oper.DataAnalyser.performAnalysisOfNewsAndFormDataMart()
     logger.info(f"PerformCategoryAnalysis finished")
   }
 
