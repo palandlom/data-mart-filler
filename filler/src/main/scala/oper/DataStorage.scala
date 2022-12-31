@@ -11,7 +11,7 @@ import java.nio.file.{Files, Paths}
 import java.util.concurrent.ConcurrentHashMap
 import scala.io.Source
 import scala.jdk.CollectionConverters.ConcurrentMapHasAsScala
-
+import conf.AppConf
 
 object DataStorage extends LazyLogging {
 
@@ -42,10 +42,10 @@ object DataStorage extends LazyLogging {
       f"${index}_${base}"
     }
 
-    var filepath = Paths.get(_root_.conf.rawNewsFilesDirPath, getFileName(i, filenameBase))
+    var filepath = Paths.get(AppConf.rawNewsFilesDirPath, getFileName(i, filenameBase))
     while (Files.exists(filepath)) {
       i += 1
-      filepath = Paths.get(_root_.conf.rawNewsFilesDirPath, getFileName(i, filenameBase))
+      filepath = Paths.get(AppConf.rawNewsFilesDirPath, getFileName(i, filenameBase))
     }
 
     // Write news to file as json-strings + collect dropped newsId
@@ -90,7 +90,7 @@ object DataStorage extends LazyLogging {
         None
       }
     }
-    val filesToLoad = Utiler.getListOfFiles(_root_.conf.rawNewsFilesDirPath)
+    val filesToLoad = Utiler.getListOfFiles(AppConf.rawNewsFilesDirPath)
       .filter(f => {
         val pnum = getPortionNumFromFileName(f.getName)
         (!pnum.isEmpty && pnum.get >= portionNum)
@@ -111,7 +111,7 @@ object DataStorage extends LazyLogging {
    */
   def getNewsPortions(portionNums: Int*): Seq[RawNewsDTO] = {
     // TODO get all files
-    val filesToLoad = Utiler.getListOfFiles(_root_.conf.rawNewsFilesDirPath)
+    val filesToLoad = Utiler.getListOfFiles(AppConf.rawNewsFilesDirPath)
       .filter(f => {
         var i = 0
         var isFound = false

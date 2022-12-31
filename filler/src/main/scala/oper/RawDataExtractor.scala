@@ -11,7 +11,7 @@ import java.time.Instant
 import scala.jdk.CollectionConverters._
 
 
-
+/** Collect new from rss-sources */
 class RawDataExtractor {
 
   def collectNews(urlStr: String): Seq[RawNewsDTO] = {
@@ -21,42 +21,13 @@ class RawDataExtractor {
     val feed: SyndFeed = input.build(new XmlReader(feedUrl)) // TODO throws IllegalArgumentException, FeedException
     val entries = asScala(feed.getEntries).toVector
 
-
     entries.map(entry => {
       RawNewsDTO(entry.getCategories.asScala.map(sc => sc.getName).toList,
         entry.getTitle,
         entry.getUri,
-        entry.getPublishedDate.toInstant.toString)}
+        entry.getPublishedDate.toInstant.toString)
+    }
     )
-//
-//
-//    println("Date:  " + entry.getUpdatedDate)
-//    NewsDTO(entry.getTitle, entry.getUri, _) // TODO entry.getUpdatedDate
-//
-//
-//    for (entry <- entries) {
-//      val news = NewsDTO(entry.getTitle, entry.getUri,_) // TODO entry.getUpdatedDate)
-//      println("Date:  " + entry.getUpdatedDate)
-//
-//      // java.util.List[SyndLink]
-//      val links = asScala(entry.getLinks).toVector
-//      for (link <- links) {
-//        println("Link: " + link.getHref)
-//      }
-//
-//      val contents = asScala(entry.getContents).toVector
-//      for (content <- contents) {
-//        println("Content: " + content.getValue)
-//      }
-//
-//      val categories = asScala(entry.getCategories).toVector
-//      for (category <- categories) {
-//        println("Category: " + category.getName)
-//      }
-//
-//      println("")
-//    }
-
   }
 
 }

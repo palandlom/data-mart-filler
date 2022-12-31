@@ -1,5 +1,8 @@
 package oper
 
+import com.typesafe.scalalogging.LazyLogging
+import conf.SparkConf.sparkConf
+import oper.RawDataProcessor.logger
 import org.apache.spark.sql.Row
 import org.apache.spark.sql.types.DoubleType
 
@@ -18,7 +21,7 @@ import scala.jdk.CollectionConverters._
 import java.time.temporal.ChronoUnit
 
 
-object DataAnalyser {
+object DataAnalyser extends LazyLogging{
 
   /* === Datamart dataframe schemes ===*/
   var categoryStatSchema = StructType(
@@ -27,10 +30,10 @@ object DataAnalyser {
       StructField("news_total", LongType, true) ::
       // Среднее количество публикаций по данной категории в сутки
       StructField("news_average_per_day", DoubleType, true) ::
-      // Общее количество новостей из всех источников по данной категории за последние сутки
-      StructField("news_total_per_day", LongType, true) ::
       // День, в который было сделано максимальное количество новостей по данной категории
       StructField("max_news_day", DateType, true) ::
+      // Общее количество новостей из всех источников по данной категории за последние сутки
+      StructField("news_total_last_day", LongType, true) ::
       Nil
   )
 
@@ -47,18 +50,18 @@ object DataAnalyser {
       // Количество новостей данной категории для каждого из источников за последние сутки
       StructField("news_total_for_last_day", LongType, true) ::
       // Количество новостей данной категории для каждого из источников за все время
-      StructField("news_total_per_day", LongType, true) ::
+      StructField("news_total", LongType, true) ::
       Nil)
 
   /**
    * Analyse news, form intermediate dataframes, join
    * them and write/overwrite data mart tables in database.
    */
-  def performAnalysisOfNewsAndFormDataMart(): Unit = {git
-    
+  def performAnalysisOfNewsAndFormDataMart(): Unit = {
+    logger.info(f"performAnalysisOfNewsAndFormDataMart started")
     val newsDf = getNewsDataFrame()
 
-    // === 1 categoryStat
+    // === 1 categoryToStat
     val newsWithPublicationDateDf = newsDf
       .withColumn("published_date",
         date_format(col("published_datetime"), "yyyy-MM-dd"))
@@ -77,7 +80,7 @@ object DataAnalyser {
       .select(col("canonical_category"), col("avg(count)").alias("news_average_per_day"))
 
     // Общее количество новостей из всех источников по данной категории за последние сутки
-    val lastDayDateInstant = Instant.now.minus(7, ChronoUnit.DAYS) // lastDayDateInstant = последние сутки
+    val lastDayDateInstant = Instant.now.minus(1, ChronoUnit.DAYS) // lastDayDateInstant = последние сутки
     val lastDayDate = Date.from(lastDayDateInstant)
     val formatter = new SimpleDateFormat(conf.DatabaseConf.dateFormatString)
     val lastDayDateStr = formatter.format(lastDayDate)
@@ -86,6 +89,7 @@ object DataAnalyser {
       .groupBy("canonical_category")
       .count()
       .select(col("canonical_category"), col("count").alias("news_total_last_day"))
+
 
     // День, в который было сделано максимальное количество новостей по данной категории
     // see https://sparkbyexamples.com/spark/spark-find-maximum-row-per-group-in-dataframe/
@@ -101,14 +105,18 @@ object DataAnalyser {
       .select(col("canonical_category"),
         to_date(col("published_date"),conf.DatabaseConf.dateFormatString).as("max_news_day"))
 
+
     // Join all intermediate DFs
     val categoryStatMartRawDf = newsTotalByCategoryDf
       .join(newsAveragePerDayByCategory, Seq("canonical_category"), "full")
-      .join(newsTotalLastDay, Seq("canonical_category"),"full")
       .join(maxNewsDay, Seq("canonical_category"),"full")
+      .join(newsTotalLastDay, Seq("canonical_category"),"full")
+      .na.fill(0, Array("news_total_last_day"))
+
 
     // Write dataMart DF to db
-    val categoryStatMartDf = conf.SparkConf.sparkSession.createDataFrame(categoryStatMartRawDf.collect().toList.asJava,  categoryStatSchema)
+    val categoryStatMartDf = conf.SparkConf.sparkSession
+      .createDataFrame(categoryStatMartRawDf.collect().toList.asJava,  categoryStatSchema)
     categoryStatMartDf.write.mode("overwrite")
       .format("jdbc")
       .option("url", DatabaseConf.Url())
@@ -117,6 +125,7 @@ object DataAnalyser {
       .option("password", DatabaseConf.pass)
       .save()
 
+    categoryStatMartDf.show()
 
     // === 2 daysToCategoryStat
     // Количество публикаций новостей данной категории по дням недели
@@ -126,6 +135,7 @@ object DataAnalyser {
       .sort(col("day_of_week").desc)
 
     daysToCategoryStatSchemaMartRawDf.show()
+
     // Write dataMart DF to db
     val daysToCategoryStatSchemaMartDf = conf.SparkConf.sparkSession.createDataFrame(daysToCategoryStatSchemaMartRawDf.collect().toList.asJava,  daysToCategoryStatSchema)
     daysToCategoryStatSchemaMartDf.write.mode("overwrite")
@@ -156,22 +166,28 @@ object DataAnalyser {
     // Количество новостей данной категории для каждого из источников за все время
     val ctgAndSourceNewsDf = newsWithPublicationDateAndSourceDf
       .groupBy("canonical_category", "source").count()
+      .select(col("source"), col("canonical_category"),
+        col("count").alias("news_total"))
+      .na.fill(0, Array("news_total"))
 
     // Join all intermediate DFs
     val categoryToSourceStatSchemaMartRawDf = ctgAndSourceNewsLastDayDf
-      .join(ctgAndSourceNewsDf, Seq("canonical_category"), "full")
-      .join(newsTotalLastDay, Seq("canonical_category"), "full")
-      .join(maxNewsDay, Seq("canonical_category"), "full")
+      .join(ctgAndSourceNewsDf, Seq("canonical_category", "source"), "full")
+      .na.fill(0, Array("news_total_for_last_day"))
+
+    categoryToSourceStatSchemaMartRawDf.show()
 
     // Write dataMart DF to db
     val categoryToSourceStatSchemaMartDf = conf.SparkConf.sparkSession.createDataFrame(categoryToSourceStatSchemaMartRawDf.collect().toList.asJava, categoryToSourceStatSchema)
     categoryToSourceStatSchemaMartDf.write.mode("overwrite")
       .format("jdbc")
       .option("url", DatabaseConf.Url())
-      .option("dbtable", f"${DatabaseConf.daysToCategoryStatTableName}")
+      .option("dbtable", f"${DatabaseConf.categoryToSourceStatTableName}")
       .option("user", DatabaseConf.user)
       .option("password", DatabaseConf.pass)
       .save()
+
+    logger.info(f"performAnalysisOfNewsAndFormDataMart finished")
   }
 
   /**
@@ -179,7 +195,7 @@ object DataAnalyser {
    * @return NewsDataFrame["news_hash", "title", "url", "published_datetime", "canonical_category"]
    */
   def getNewsDataFrame(): DataFrame = {
-    val df = sparkSession.read.format("jdbc")
+    val df = conf.SparkConf.sparkSession.read.format("jdbc")
       .option("url", DatabaseConf.Url())
       .option("dbtable", f"${DatabaseConf.newsTableName}")
       .option("user", DatabaseConf.user)

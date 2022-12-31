@@ -10,7 +10,6 @@ object DBManager extends LazyLogging {
   // load and register JDBC driver for MySQL
   Class.forName("org.postgresql.Driver")
 
-  // Change to Your Database Config
   //  val conn_str = f"jdbc:mysql://localhost:3306/DBNAME?user=DBUSER&password=DBPWD"
   val connectionStr = f"jdbc:postgresql://" +
     f"${DatabaseConf.addr}:" +
@@ -31,7 +30,7 @@ object DBManager extends LazyLogging {
     conn.foreach(c => {
       val stm = c.createStatement()
       try {
-        stm.executeQuery(query)
+        stm.executeUpdate(query)
       } catch {
         case e: SQLException =>
           logger.error(f"can't execute query ${e.getMessage}")

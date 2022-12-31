@@ -1,0 +1,4 @@
+
+
+mainClass := Some("main.Main")
+

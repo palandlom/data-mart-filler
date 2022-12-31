@@ -5,7 +5,7 @@ import com.typesafe.scalalogging.LazyLogging
 import conf.DatabaseConf
 import datamodels.RawNewsDTO
 import org.apache.spark.SparkConf
-import org.apache.spark.sql.{SaveMode, SparkSession}
+import org.apache.spark.sql.SparkSession
 
 import java.io.File
 import java.text.SimpleDateFormat
@@ -13,7 +13,10 @@ import java.util.Locale
 import scala.collection.convert.ImplicitConversions.`list asScalaBuffer`
 import scala.io.Source
 import scala.util.{Failure, Success, Try}
-import java.sql.Timestamp
+import conf.SparkConf.{sparkContext, sparkSession}
+
+import java.sql.SQLIntegrityConstraintViolationException
+
 
 //import  org.apache.spark.sql.sources.
 // This import is needed to use the $-notation
@@ -22,33 +25,10 @@ import java.sql.Timestamp
 object RawDataProcessor extends LazyLogging {
 
   var nextPortionCounter: Int = -1
-  var portionFilePath = ".lastPortionNum"
-
-  // есть Н-файлов + пронумерованных
-  // нужно загрузить счетчик следующего файла из файла nextFileNumber +
-  // если нет -> начать с 0 + сохранить 0счетчик в файл
-  //
-  //  загрузили файл + почистили его
-  //
-  // грузим в бд в таблицу NEWS
-  // загрузили - обновили мчетчик
-
+  var portionFilePath = ".nextPortionNum"
   val UNKNOWN_CATEGORY = "_unknown_category_"
 
-  val sparkConf = new SparkConf()
-    .setAppName("RawDataProcessor")
-    .setMaster("local")
-
-  val sparkSession = SparkSession
-    .builder()
-    .config(sparkConf)
-    .config("spark.jars", "./sparkjars/postgresql-42.5.1.jar")
-    .getOrCreate()
-
-  val sparkContext = sparkSession.sparkContext
-
-
-  val categoryMappingDF = this.sparkSession.read
+  val categoryMappingDF = sparkSession.read
     .format("jdbc")
     .option("url", DatabaseConf.Url())
     .option("dbtable", f"${DatabaseConf.categoryMappingTableName}")
@@ -56,7 +36,7 @@ object RawDataProcessor extends LazyLogging {
     .option("password", DatabaseConf.pass)
     .load()
 
-  val newsDF = this.sparkSession.read
+  val newsDF = sparkSession.read
     .format("jdbc")
     .option("url", DatabaseConf.Url())
     .option("dbtable", f"${DatabaseConf.newsTableName}")
@@ -64,7 +44,7 @@ object RawDataProcessor extends LazyLogging {
     .option("password", DatabaseConf.pass)
     .load()
 
-  val uncategorizedNewsDF = this.sparkSession.read
+  val uncategorizedNewsDF = sparkSession.read
     .format("jdbc")
     .option("url", DatabaseConf.Url())
     .option("dbtable", f"${DatabaseConf.uncategorizedNewsTableName}")
@@ -73,16 +53,9 @@ object RawDataProcessor extends LazyLogging {
     .load()
 
 
-  {
-
-    sparkContext.setLogLevel("ERROR")
-
-
-    this.newsDF.createOrReplaceTempView(DatabaseConf.newsTableName)
-    this.categoryMappingDF.createOrReplaceTempView(DatabaseConf.categoryMappingTableName)
-    this.uncategorizedNewsDF.createOrReplaceTempView(DatabaseConf.uncategorizedNewsTableName)
-  }
-
+  this.newsDF.createOrReplaceTempView(DatabaseConf.newsTableName)
+  this.categoryMappingDF.createOrReplaceTempView(DatabaseConf.categoryMappingTableName)
+  this.uncategorizedNewsDF.createOrReplaceTempView(DatabaseConf.uncategorizedNewsTableName)
 
   def getNextPortionNum(): Int = {
     if (this.nextPortionCounter < 0) {
@@ -106,14 +79,18 @@ object RawDataProcessor extends LazyLogging {
 
   def cleanAndUploadRawData(rawNews: Seq[RawNewsDTO]): Unit = {
     val categoryMapping = getExistingCategoryMapping()
+    logger.info(f" Get category mapping - size ${categoryMapping.size}")
+
     val categorizedNews = rawNews.groupBy(n => getCanonicalCategory(n, categoryMapping))
+    logger.info(f" Categorized news - size ${categorizedNews.values.map{var s = 0; d => {s += d.size; s}}}")
+
     this.insertNewsToTables(categorizedNews)
   }
 
   def processUncategorizedNews(): Unit = {
+    logger.info(f"processUncategorizedNews started")
     import sparkSession.implicits._
     val sdf: SimpleDateFormat = new SimpleDateFormat(conf.DatabaseConf.timestampFormatString, Locale.getDefault)
-
 
     val uncategorizedNews = this.uncategorizedNewsDF.map(row => {
       val timestamp = Utiler.TimestampToString(row.get(3), sdf)
@@ -122,18 +99,29 @@ object RawDataProcessor extends LazyLogging {
           logger.error(f"can't cast Timestamp to string - skip uncategorized news hash:[${row.get(0)}]")
           Option.empty[RawNewsDTO]
         }
-        case _ => Some(RawNewsDTO(
-          Categories = Utiler.ParseJsonArray(row.getString(4)),
-          Title = row.getString(1),
-          Url = row.getString(2),
-          PublishedDateTime = timestamp.get))
+        case _ => {
+          val categories = Utiler.ParseJsonArray(row.getString(4))
+          if (categories.isEmpty) {
+            logger.error(f"can't parse categories - skip uncategorized news hash:[${row.get(0)}]")
+            Option.empty
+          }
+          else Some(RawNewsDTO(
+            Categories = categories.get,
+            Title = row.getString(1),
+            Url = row.getString(2),
+            PublishedDateTime = timestamp.get))
+        }
       }
     }).filter(!_.isEmpty).map(e => e.get).collect().toSeq
+
+
 
     val categoryMapping = getExistingCategoryMapping()
     val categorizedNews = uncategorizedNews.groupBy(n => getCanonicalCategory(n, categoryMapping))
     val processedNewsHashes = insertNewsToTables(categorizedNews)
     deleteFromUncategorizedNewsTable(processedNewsHashes)
+    logger.info(f"Get ${uncategorizedNews.size} uncategorizedNews for processing - ${processedNewsHashes.size} were categorized")
+    logger.info(f"processUncategorizedNews finished")
   }
 
 
@@ -157,9 +145,11 @@ object RawDataProcessor extends LazyLogging {
         }
 
         try {
-          this.sparkSession.sql(query)
-          addedNewsHashes = addedNewsHashes :+ news.md5() // if no exception then add to hashes
+          sparkSession.sql(query)
+          addedNewsHashes = addedNewsHashes :+ news.md5() // if no exception then add to hashes of added news
         } catch {
+          // if duplicate key exception then add this news to hashes of added news - it is already added
+          case e: SQLIntegrityConstraintViolationException => addedNewsHashes = addedNewsHashes :+ news.md5()
           case e: Exception => None
         }
 
@@ -176,7 +166,7 @@ object RawDataProcessor extends LazyLogging {
           f"VALUES ('${Utiler.md5(ctg)}', '${ctg}', '');"
 
         try {
-          this.sparkSession.sql(query)
+          sparkSession.sql(query)
         } catch {
           case e: Exception => None
         }
@@ -186,6 +176,7 @@ object RawDataProcessor extends LazyLogging {
   /**
    * Delete news from UncategorizedNewsTable by given hashes. Deletion is performed
    * by non-spark way
+   *
    * @param newsHashes
    */
   private def deleteFromUncategorizedNewsTable(newsHashes: Seq[String]): Unit = {
@@ -208,7 +199,6 @@ object RawDataProcessor extends LazyLogging {
 
   /**
    * Read mapping from db-table.
-   *
    * @return map{raw_category : canonical_category}
    */
   private def getExistingCategoryMapping() =
@@ -219,7 +209,12 @@ object RawDataProcessor extends LazyLogging {
       })
       .toMap
 
-
+  /**
+   * For given news returns its canonical category or UNKNOWN_CATEGORY
+   * @param news
+   * @param categoryMapping {raw_cat: canonical_cat}
+   * @return
+   */
   private def getCanonicalCategory(news: RawNewsDTO, categoryMapping: Map[String, String]): String = {
     val foundCanonicalCategories = news.Categories
       .filter(newsCtg => categoryMapping.contains(newsCtg.toLowerCase()))

@@ -90,7 +90,14 @@ object Utiler {
 
   def ParseJsonArray(jsonArraySting: String) = {
     implicit val formats = DefaultFormats
-    parse(jsonArraySting).extract[List[String]]
+    try {
+      Some(parse(jsonArraySting).extract[List[String]])
+    } catch {
+      case e: Exception => Option.empty
+    }
+
+
+
   }
 
   def TimestampToString(timestamp: Any, sdf: SimpleDateFormat): Option[String] = {

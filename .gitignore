@@ -11,6 +11,9 @@ sparkjars/
 **/.bsp/**
 *.iml
 
+# docker db-volumes
+vol/postgres*/
+
 # C extensions
 *.so
 
