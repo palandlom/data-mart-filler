@@ -2,7 +2,7 @@
 
 # General description
 
-All phases of ETL-proccess to form/update data mart are performed by the application `filler` which is executable jar. 
+All phases of ETL-proccess to form/update data mart are performed by the application `filler` which is packed in jar-file. 
 
 `filler` can be executed from `./app` directory in the following modes:
 * `all` - multithread downloadind of the news from RSS-resourses to `./app/newsFiles/X_news` file - command `java -cp "./*" main.Main all`
@@ -14,7 +14,7 @@ All phases of ETL-proccess to form/update data mart are performed by the applica
 
 `filler`-jar should be placed in `./app` directory with required spark-jars.
 `./app` directory will be bind to airflow-worker-container and `filler`-jar will be called by airflow-DAG `update-news-datamart`.
-The Airflow-DAG `update-news-datamart` contains tasks for each of noted `filler`-modes. The DAG is started every day on 00:30.
+The Airflow-DAG [`update-news-datamart`](https://github.com/palandlom/data-mart-filler/blob/main/vol/dags/update-news-datamart.py) contains tasks for each of noted `filler`-modes. The DAG is started every day on 00:30.
 
 The results of each run of the DAG:
 - new file with news in `./app/newsFiles/`
@@ -30,7 +30,7 @@ user postgres
 pass pass
 dbName news
 ```
-Other docs (presentation, schemes etc.) can are on link - [data-mart-filler-files](https://drive.google.com/drive/folders/1LdsLgEfWh0A_FrS42kdk_shj8XcpNPRf?usp=share_link)
+Other docs (presentation, schemes etc.) can be reseived by [data-mart-filler-files](https://drive.google.com/drive/folders/1LdsLgEfWh0A_FrS42kdk_shj8XcpNPRf?usp=share_link)
 
 # Deploy 
 
